@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>文字ばらばら物理ラボ</title>
+<style>
+:root{--bg:#f4f1ea;--fg:#222;--panel:#fff;--bd:#d8d3c7;--ac:#e8590c;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15171c;--fg:#eee;--panel:#232730;--bd:#3a4050}}
+:root[data-theme="dark"]{--bg:#15171c;--fg:#eee;--panel:#232730;--bd:#3a4050}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;display:flex;flex-direction:column;overflow:hidden}
+#bar{padding:8px;display:flex;flex-direction:column;gap:6px;background:var(--panel);border-bottom:1px solid var(--bd)}
+.row{display:flex;gap:6px}
+input,select,button{font:inherit;font-size:16px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg)}
+input{flex:1;min-width:0}
+button{cursor:pointer;white-space:nowrap}
+button.pri{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:700}
+.row button,.row select{flex:1;padding:8px 4px}
+#wrap{flex:1;min-height:0;position:relative}
+canvas{display:block;touch-action:none}
+</style></head><body>
+<div id="bar">
+<div class="row"><input id="inp" value="物理演算" maxlength="40" enterkeyhint="go" autocomplete="off"><button id="go" class="pri">落とす</button></div>
+<div class="row"><select id="sel"><option value="2">破片</option><option value="1">パーツ</option><option value="0">文字</option></select><button id="flip">重力反転</button><button id="jump">跳ね上げ</button><button id="boom">爆発</button><button id="clr">消す</button></div>
+</div>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+const {Engine,Body,Bodies,Composite,Mouse,MouseConstraint,Vertices}=Matter;
+const $=id=>document.getElementById(id);
+const engine=Engine.create(),world=engine.world;
+const wrap=$('wrap'),cv=$('cv'),ctx=cv.getContext('2d');
+const mouse=Mouse.create(cv);
+Composite.add(world,MouseConstraint.create(engine,{mouse,constraint:{stiffness:.2,render:{visible:false}}}));
+let W=300,H=300,dpr=1,walls=[],pieces=[],timers=[];
+function buildWalls(){
+  Composite.remove(world,walls);
+  const o={isStatic:true,friction:.6};
+  walls=[Bodies.rectangle(W/2,H+100,W*4,200,o),Bodies.rectangle(-100,H/2,200,H*6,o),Bodies.rectangle(W+100,H/2,200,H*6,o),Bodies.rectangle(W/2,-H*1.5-100,W*4,200,o)];
+  Composite.add(world,walls);
+}
+function resize(){
+  dpr=Math.min(devicePixelRatio||1,2);W=wrap.clientWidth;H=wrap.clientHeight;
+  cv.width=W*dpr;cv.height=H*dpr;cv.style.width=W+'px';cv.style.height=H+'px';
+  mouse.pixelRatio=dpr;buildWalls();
+}
+new ResizeObserver(resize).observe(wrap);resize();
+
+const S=200,oc=document.createElement('canvas');oc.width=oc.height=S;
+const oct=oc.getContext('2d',{willReadFrequently:true});
+function hull(P){
+  P.sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+  const lo=[],up=[];
+  for(const p of P){while(lo.length>=2&&cr(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop();lo.push(p)}
+  for(let i=P.length-1;i>=0;i--){const p=P[i];while(up.length>=2&&cr(up[up.length-2],up[up.length-1],p)<=0)up.pop();up.push(p)}
+  up.pop();lo.pop();return lo.concat(up);
+}
+// mode 0: 文字ごと / 1: パーツ(つながった塊) / 2: 破片(さらに格子で分割)
+function glyphPieces(ch,mode,color){
+  oct.clearRect(0,0,S,S);oct.fillStyle='#fff';
+  oct.font='700 160px "Hiragino Sans","Noto Sans JP","Yu Gothic","Hiragino Kaku Gothic ProN",sans-serif';
+  oct.textAlign='center';oct.textBaseline='middle';oct.fillText(ch,S/2,S/2);
+  const d=oct.getImageData(0,0,S,S).data,N=S*S,on=new Uint8Array(N);
+  for(let i=0;i<N;i++)on[i]=d[i*4+3]>100?1:0;
+  let fl=new Int32Array(N).fill(-1);
+  if(mode===0){for(let i=0;i<N;i++)if(on[i])fl[i]=0}
+  else{
+    const comp=new Int32Array(N).fill(-1),st=[];let c=0;
+    for(let i=0;i<N;i++){
+      if(!on[i]||comp[i]>=0)continue;comp[i]=c;st.push(i);
+      while(st.length){
+        const p=st.pop(),x=p%S,y=(p/S)|0;
+        for(const q of [x>0?p-1:-1,x<S-1?p+1:-1,y>0?p-S:-1,y<S-1?p+S:-1])
+          if(q>=0&&on[q]&&comp[q]<0){comp[q]=c;st.push(q)}
+      }
+      c++;
+    }
+    if(mode===1)fl=comp;
+    else{const m=new Map();for(let i=0;i<N;i++){if(comp[i]<0)continue;const k=comp[i]*25+((i/S/40)|0)*5+(((i%S)/40)|0);if(!m.has(k))m.set(k,m.size);fl[i]=m.get(k)}}
+  }
+  const G=[];
+  for(let i=0;i<N;i++){
+    const id=fl[i];if(id<0)continue;
+    const x=i%S,y=(i/S)|0,g=G[id]||(G[id]={n:0,x0:S,y0:S,x1:0,y1:0,b:[]});
+    g.n++;if(x<g.x0)g.x0=x;if(x>g.x1)g.x1=x;if(y<g.y0)g.y0=y;if(y>g.y1)g.y1=y;
+    if(x===0||y===0||x===S-1||y===S-1||fl[i-1]!==id||fl[i+1]!==id||fl[i-S]!==id||fl[i+S]!==id)g.b.push([x+.5,y+.5]);
+  }
+  const out=[],minN=mode===0?1:(mode===1?25:40);
+  for(let id=0;id<G.length;id++){
+    const g=G[id];if(!g||g.n<minN)continue;
+    let h=hull(g.b);if(h.length<3)continue;
+    if(h.length>14){const s=Math.ceil(h.length/14);h=h.filter((_,i)=>i%s===0)}
+    if(h.length<3)continue;
+    const c=Vertices.centre(h.map(p=>({x:p[0],y:p[1]})));
+    const w=g.x1-g.x0+1,hh=g.y1-g.y0+1,sp=document.createElement('canvas');sp.width=w;sp.height=hh;
+    const sc=sp.getContext('2d'),im=sc.createImageData(w,hh);
+    for(let y=0;y<hh;y++)for(let x=0;x<w;x++){const i=(y+g.y0)*S+x+g.x0;if(fl[i]===id){im.data[(y*w+x)*4+3]=d[i*4+3]}}
+    sc.putImageData(im,0,0);sc.globalCompositeOperation='source-in';
+    sc.fillStyle=mode===0?color:color.replace(/\d+%\)$/,(55+Math.random()*20|0)+'%)');sc.fillRect(0,0,w,hh);
+    out.push({sp,h,cx:c.x,cy:c.y,x0:g.x0,y0:g.y0,w,hh});
+  }
+  return out;
+}
+function clearAll(){timers.forEach(clearTimeout);timers=[];Composite.remove(world,pieces);pieces=[]}
+function spawn(){
+  const text=[...$('inp').value].filter(c=>c.trim()).slice(0,40);if(!text.length)return;
+  const mode=+$('sel').value,n=text.length,base=Math.random()*360;
+  const size=Math.max(40,Math.min(120,W/Math.min(n,6)*.9)),k=size/160;
+  const per=Math.max(1,Math.floor(W/(size*1.05)));
+  text.forEach((ch,i)=>{
+    const row=(i/per)|0,col=i%per,cnt=Math.min(per,n-row*per);
+    const ox=W/2+(col-(cnt-1)/2)*size*1.05,oy=size*.6-row*size*1.1;
+    timers.push(setTimeout(()=>{
+      for(const pc of glyphPieces(ch,mode,`hsl(${(base+i*47)%360},80%,60%)`)){
+        const v=pc.h.map(p=>({x:(p[0]-pc.cx)*k,y:(p[1]-pc.cy)*k}));
+        Vertices.clockwiseSort(v);
+        const b=Body.create({position:{x:ox+(pc.cx-S/2)*k,y:oy+(pc.cy-S/2)*k},vertices:v,restitution:.35,friction:.6,frictionAir:.004});
+        b.spr=pc.sp;b.off=[(pc.x0-pc.cx)*k,(pc.y0-pc.cy)*k,pc.w*k,pc.hh*k];
+        Body.setVelocity(b,{x:(Math.random()-.5)*3,y:2});Body.setAngularVelocity(b,(Math.random()-.5)*.1);
+        Composite.add(world,b);pieces.push(b);
+      }
+    },i*90));
+  });
+}
+$('go').onclick=spawn;
+$('inp').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('inp').blur();spawn()}});
+$('clr').onclick=clearAll;
+$('flip').onclick=()=>{engine.gravity.y*=-1};
+$('jump').onclick=()=>pieces.forEach(b=>Body.setVelocity(b,{x:(Math.random()-.5)*14,y:-10-Math.random()*12}));
+$('boom').onclick=()=>pieces.forEach(b=>{
+  const dx=b.position.x-W/2,dy=b.position.y-H*.85,l=Math.hypot(dx,dy)||1,s=16+Math.random()*8;
+  Body.setVelocity(b,{x:dx/l*s,y:dy/l*s});Body.setAngularVelocity(b,(Math.random()-.5)*.4);
+});
+function loop(){
+  Engine.update(engine,1000/60);
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+  for(const b of pieces){
+    ctx.save();ctx.translate(b.position.x,b.position.y);ctx.rotate(b.angle);
+    ctx.drawImage(b.spr,b.off[0],b.off[1],b.off[2],b.off[3]);ctx.restore();
+  }
+  if(!pieces.length){ctx.fillStyle='#888';ctx.font='14px system-ui,sans-serif';ctx.textAlign='center';ctx.fillText('文字を入力して「落とす」 / 落ちた破片はドラッグで投げられます',W/2,H/2)}
+  requestAnimationFrame(loop);
+}
+loop();spawn();
+</script></body></html>
